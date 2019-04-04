@@ -106,9 +106,6 @@ class TDDFT(object):
         self.VH0=np.einsum('kn,knqij->qij',self.occupation(self.wavefunction),self.Hartree_elements)
         self.VLDAc0=np.einsum('kn,knqij->qij',self.occupation(self.wavefunction),self.LDAc_elements)
         self.VLDAx0=np.einsum('kn,knqij->qij',self.occupation(self.wavefunction),self.LDAx_elements)
-        
-        self.Full_BZ=calc.get_bz_k_points()
-        self.IBZ_map=calc.get_bz_to_ibz_map()
     
     
     def get_transition_matrix(self,direction):
