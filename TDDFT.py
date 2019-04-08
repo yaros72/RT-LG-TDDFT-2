@@ -29,7 +29,6 @@ class TDDFT(object):
         self.Hartree_elements=np.zeros((self.NK,self.nbands,self.NK,self.nbands,self.nbands),dtype=np.complex)
         self.LDAx_elements=np.zeros((self.NK,self.nbands,self.NK,self.nbands,self.nbands),dtype=np.complex)
         self.LDAc_elements=np.zeros((self.NK,self.nbands,self.NK,self.nbands,self.nbands),dtype=np.complex)
-        
         self.kd=KPointDescriptor([[0,0,0]]) 
         self.pd=PWDescriptor(ecut=calc.wfs.pd.ecut,gd=calc.wfs.gd,kd=self.kd,dtype=complex)
         
@@ -96,25 +95,21 @@ class TDDFT(object):
         self.VH0=np.einsum('kn,knqij->qij',occ,self.Hartree_elements)
         self.VLDAx0=np.einsum('kn,knqij->qij',occ,self.LDAx_elements)
         self.VLDAc0=np.einsum('kn,knqij->qij',occ,self.LDAc_elements)
-        
         self.get_transition_matrix(direction)
         self.P=np.zeros(steps,dtype=np.complex)
-        
-        
+        H=self.hamiltonian(self.wfn)
         for t in tqdm(range(steps)):
             self.P[t]=self.polarization()
-            
-            H=self.hamiltonian(self.wfn)
             wfn_next=np.copy(self.wfn)
             for i in range(n_corrections):
-                H_next=self.hamiltonian(wfn_next)
+                H_next=self.hamiltonian(wfn_next)+E(t*dt)*self.dipole
                 H_mid=0.5*(H+H_next)
                 for q in range(self.NK):
                     H_left = I+0.5j*dt*H_mid[q]            
                     H_right= I-0.5j*dt*H_mid[q]
                     wfn_next[q]=linalg.solve(H_left, H_right@self.wfn[q]) 
             self.wfn=np.copy(wfn_next)
-                
+            H=H_next
                 
                 
                 
