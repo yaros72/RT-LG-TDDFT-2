@@ -1,7 +1,7 @@
 data_image0
 _cell_length_a       2.51298
 _cell_length_b       2.51298
-_cell_length_c       7.08154
+_cell_length_c       20
 _cell_angle_alpha    90
 _cell_angle_beta     90
 _cell_angle_gamma    120
@@ -22,6 +22,5 @@ loop_
   _atom_site_thermal_displace_type
   _atom_site_B_iso_or_equiv
   _atom_site_type_symbol
-  B1       1.0000 0.00000  0.00000  0.00000  Biso   1.000  B
-  N1       1.0000 0.33333  0.66667  0.00000  Biso   1.000  N
-  
+  B1       1.0000 0.33334  0.16667  0.50000  Biso   1.000  B
+  N1       1.0000 0.66666  0.83333  0.50000  Biso   1.000  N
