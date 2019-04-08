@@ -7,155 +7,121 @@ from ase.units import Hartree, Bohr
 from itertools import product
 from gpaw.wavefunctions.pw import PWDescriptor
 from gpaw.kpt_descriptor import KPointDescriptor
-
-@numba.jit(nopython=True,parallel=True,fastmath=True)
-def operator_matrix_periodic(matrix,operator,wf_conj,wf):
-    """perform integration of periodic part of Kohn Sham wavefunction"""
-    NK=matrix.shape[0]
-    nbands=matrix.shape[1]
-    for k in numba.prange(NK):
-        for n1 in range(nbands):
-            for n2 in range(nbands):
-                matrix[k,n1,n2]=np.sum(operator[2:-1,2:-1,2:-1]*wf_conj[k,n1][2:-1,2:-1,2:-1]*wf[k,n2][2:-1,2:-1,2:-1])
-    return matrix
-
+from gpaw.utilities import unpack
+from gpaw.mixer import DummyMixer
 class TDDFT(object):
-    """
-    Time-dependent DFT+Hartree-Fock in Kohn-Sham orbitals basis:
-    
-        calc: GPAW calculator (setups='sg15')
-        nbands (int): number of bands in calculation
-        
-    """
-    
-    def __init__(self,calc,nbands=None):
+    def __init__(self,calc):
         self.calc=calc
+        self.wfs=self.calc.wfs
+        
         self.K=calc.get_ibz_k_points() # reduced Brillioun zone
         self.NK=self.K.shape[0] 
-        
         self.wk=calc.get_k_point_weights() # weight of reduced Brillioun zone
-        if nbands is None:
-            self.nbands=calc.get_number_of_bands()
-        else:
-            self.nbands=nbands
-        self.nvalence=int(calc.get_number_of_electrons()/2)
-        
-        self.EK=[calc.get_eigenvalues(k)[:self.nbands] for k in range(self.NK)] # bands energy
-        self.EK=np.array(self.EK)/Hartree
-        self.shape=tuple(calc.get_number_of_grid_points()) # shape of real space grid
-        self.density=calc.get_pseudo_density()*Bohr**3 # density at zero time
-        
-        
-        # array of u_nk (periodic part of Kohn-Sham orbitals,only reduced Brillion zone)
-        self.ukn=np.zeros((self.NK,self.nbands,)+self.shape,dtype=np.complex) 
-        for k in range(self.NK):
-            kpt = calc.wfs.kpt_u[k]
-            for n in range(self.nbands):
-                psit_G = kpt.psit_nG[n]
-                psit_R = calc.wfs.pd.ifft(psit_G, kpt.q)
-                self.ukn[k,n]=psit_R 
-                
-        self.icell=2.0 * np.pi * calc.wfs.gd.icell_cv # inverse cell 
-        self.cell = calc.wfs.gd.cell_cv # cell
-        self.r=calc.wfs.gd.get_grid_point_coordinates()
-        for i in range(3):
-            self.r[i]-=self.cell[i,i]/2.
-        self.volume = np.abs(np.linalg.det(calc.wfs.gd.cell_cv)) # volume of cell
+        self.nbands=calc.get_number_of_bands()
         self.norm=calc.wfs.gd.dv # 
-        self.Fermi=calc.get_fermi_level()/Hartree #Fermi level
+
+        self.Ekin=np.zeros((self.NK,self.nbands,self.nbands),dtype=np.complex)
+        self.norm=calc.wfs.gd.dv
+        self.fqn=np.zeros((self.NK,self.nbands))
+        N = calc.wfs.pd.tmp_R.size
         
-        #desriptors at q=gamma for Hartree
-        self.kd=KPointDescriptor([[0,0,0]]) 
-        self.pd=PWDescriptor(ecut=calc.wfs.pd.ecut,gd=calc.wfs.gd,kd=self.kd,dtype=complex)
-        
-        
-        #Fermi-Dirac temperature
-        self.temperature=calc.occupations.width
-        
-        #Fermi-Dirac distribution
-        self.f=1/(1+np.exp((self.EK-self.Fermi)/self.temperature))
-        
+        self.psi=np.zeros((self.NK,self.nbands,)+tuple(self.wfs.gd.N_c[:]),dtype=np.complex)
         self.Hartree_elements=np.zeros((self.NK,self.nbands,self.NK,self.nbands,self.nbands),dtype=np.complex)
         self.LDAx_elements=np.zeros((self.NK,self.nbands,self.NK,self.nbands,self.nbands),dtype=np.complex)
         self.LDAc_elements=np.zeros((self.NK,self.nbands,self.NK,self.nbands,self.nbands),dtype=np.complex)
         
-        G=self.pd.get_reciprocal_vectors()
-        G2=np.linalg.norm(G,axis=1)**2;G2[G2==0]=np.inf
-        matrix=np.zeros((self.NK,self.nbands,self.nbands),dtype=np.complex)
+        self.kd=KPointDescriptor([[0,0,0]]) 
+        self.pd=PWDescriptor(ecut=calc.wfs.pd.ecut,gd=calc.wfs.gd,kd=self.kd,dtype=complex)
         
-        for k in tqdm(range(self.NK)):
+        G=self.pd.get_reciprocal_vectors();
+        G2=np.linalg.norm(G,axis=1);
+        G2=G2**2;
+        G2[0]=np.inf   
+        
+        for q in range(self.NK):
+            kpt=self.wfs.kpt_u[q]
+            self.Ekin[q]=np.diag(kpt.eps_n)
+            self.fqn[q]=kpt.f_n
             for n in range(self.nbands):
+                self.psi[q,n]=self.wfs.pd.ifft(kpt.psit_nG[n],kpt.q)
                 
-                density=self.norm*np.abs(self.ukn[k,n])**2
+        for q in tqdm(range(self.NK)):
+            for n in range(self.nbands):
+                density=np.abs(self.psi[q,n])**2
                 
-                operator=xc.VLDAx(density)
-                self.LDAx_elements[k,n]=operator_matrix_periodic(matrix,operator,self.ukn.conj(),self.ukn)*self.norm
-                operator=xc.VLDAc(density)
-                self.LDAc_elements[k,n]=operator_matrix_periodic(matrix,operator,self.ukn.conj(),self.ukn)*self.norm
+                VLDAx=xc.VLDAx(density)
+                VLDAc=xc.VLDAc(density)
                 
-                density=self.pd.fft(density)
-                operator=4*np.pi*self.pd.ifft(density/G2)  
-                self.Hartree_elements[k,n]=operator_matrix_periodic(matrix,operator,self.ukn.conj(),self.ukn)*self.norm
-        
-        self.wavefunction=np.zeros((self.NK,self.nbands,self.nbands),dtype=np.complex) 
-        self.Kinetic=np.zeros((self.NK,self.nbands,self.nbands),dtype=np.complex) 
-        for k in range(self.NK):
-            self.wavefunction[k]=np.eye(self.nbands)
-            self.Kinetic[k]=np.diag(self.EK[k])
-            
-        self.VH0=np.einsum('kn,knqij->qij',self.occupation(self.wavefunction),self.Hartree_elements)
-        self.VLDAc0=np.einsum('kn,knqij->qij',self.occupation(self.wavefunction),self.LDAc_elements)
-        self.VLDAx0=np.einsum('kn,knqij->qij',self.occupation(self.wavefunction),self.LDAx_elements)
-    
-    
+                nG=self.pd.fft(density)                
+                VHG=4*np.pi*nG/G2
+                VH=self.pd.ifft(VHG)
+                
+                self.Hartree_elements[q,n]=np.einsum('kixyz,kjxyz,xyz->kij',self.psi.conj(),self.psi,VH)
+                self.LDAx_elements[q,n]=np.einsum('kixyz,kjxyz,xyz->kij',self.psi.conj(),self.psi,VLDAx)
+                self.LDAc_elements[q,n]=np.einsum('kixyz,kjxyz,xyz->kij',self.psi.conj(),self.psi,VLDAc)
+                
+        self.Hartree_elements*=self.norm
+        self.LDAx_elements*=self.norm
+        self.LDAc_elements*=self.norm
+
+
     def get_transition_matrix(self,direction):
         direction/=np.linalg.norm(direction)
         self.dipole=np.zeros((self.NK,self.nbands,self.nbands),dtype=np.complex)
         for k in range(self.NK):
             kpt = self.calc.wfs.kpt_u[k]
-            G=self.calc.wfs.pd.get_reciprocal_vectors(q=k,add_q=True)
+            G=self.wfs.pd.get_reciprocal_vectors(q=k,add_q=True)
             G=np.sum(G*direction[None,:],axis=1)
-            for n in range(self.nvalence):
-                for m in range(self.nvalence,self.nbands):
-                    wfn=kpt.psit_nG[n];wfm=kpt.psit_nG[m]
-                    self.dipole[k,n,m]=self.calc.wfs.pd.integrate(wfm,G*wfn)/(self.EK[k,n]-self.EK[k,m])
-                    self.dipole[k,m,n]=self.dipole[k,n,m].conj()
-        return self.dipole
-    
-    def occupation(self,wavefunction):
-        return 2*np.sum(self.wk[:,None,None]*self.f[:,None,:]*np.abs(wavefunction)**2,axis=2)
-    
-    def fast_Hartree_matrix(self,wavefunction):
-        return np.einsum('kn,knqij->qij',self.occupation(wavefunction),self.Hartree_elements)-self.VH0
-    
-    def fast_LDA_correlation_matrix(self,wavefunction):
-        return np.einsum('kn,knqij->qij',self.occupation(wavefunction),self.LDAc_elements)-self.VLDAc0
-    
-    def fast_LDA_exchange_matrix(self,wavefunction):
-        return np.einsum('kn,knqij->qij',self.occupation(wavefunction),self.LDAx_elements)-self.VLDAx0
-    
-    def propagate(self,dt,steps,E,direction,corrections=10):
+            for n in range(self.nbands):
+                for m in range(self.nbands):
+                    if n!=m:
+                        self.dipole[k,n,m]=self.wfs.pd.integrate(kpt.psit_nG[m],G*kpt.psit_nG[n])
+                        self.dipole[k,n,m]/=(kpt.eps_n[n]-kpt.eps_n[m])
+                        
+    def polarization(self):
+        return np.einsum('qn,qin,qjn,qij',self.fqn,self.wfn.conj(),self.wfn,self.dipole)
+       
+    def hamiltonian(self,wfn):
+        occ=2*np.einsum('qn,qin->qn',self.fqn,np.abs(wfn)**2)
+        VH=np.einsum('kn,knqij->qij',occ,self.Hartree_elements)-self.VH0
+        VLDAx=np.einsum('kn,knqij->qij',occ,self.LDAx_elements)-self.VLDAx0
+        VLDAc=np.einsum('kn,knqij->qij',occ,self.LDAc_elements)-self.VLDAc0
+        return self.Ekin+VH+VLDAx+VLDAc
         
-        dipole=self.get_transition_matrix(direction)
+    def propagate(self,dt,steps,E,direction,n_corrections=3):
+        self.wfn=np.zeros((self.NK,self.nbands,self.nbands),dtype=np.complex)
+        I=np.eye(self.nbands)
+        for q in range(self.NK):self.wfn[q]=I
+        occ=2*np.einsum('qn,qin->qn',self.fqn,np.abs(self.wfn)**2)
+        self.VH0=np.einsum('kn,knqij->qij',occ,self.Hartree_elements)
+        self.VLDAx0=np.einsum('kn,knqij->qij',occ,self.LDAx_elements)
+        self.VLDAc0=np.einsum('kn,knqij->qij',occ,self.LDAc_elements)
+        
+        self.get_transition_matrix(direction)
+        self.P=np.zeros(steps,dtype=np.complex)
         
         
-        self.time_occupation=np.zeros((steps,self.nbands),dtype=np.complex) 
-        self.polarization=np.zeros(steps,dtype=np.complex)
-        
-        self.time_occupation[0]=np.sum(self.occupation(self.wavefunction),axis=0)
-        for k in range(self.NK):
-            operator=np.linalg.multi_dot([self.wavefunction[k].T.conj(),dipole[k],self.wavefunction[k]])
-            self.polarization[0]+=self.wk[k]*np.sum(operator.diagonal())
-        
-        for t in tqdm(range(1,steps)):
-            H = self.Kinetic+E[t]*self.dipole
-            H+= self.fast_Hartree_matrix(self.wavefunction)
-            H+= self.fast_LDA_correlation_matrix(self.wavefunction)
-            H+= self.fast_LDA_exchange_matrix(self.wavefunction)
-            for k in range(self.NK):
-                H_left = np.eye(self.nbands)+0.5j*dt*H[k]            
-                H_right= np.eye(self.nbands)-0.5j*dt*H[k]
-                self.wavefunction[k]=linalg.solve(H_left, H_right@self.wavefunction[k]) 
-                operator=np.linalg.multi_dot([self.wavefunction[k].T.conj(),dipole[k],self.wavefunction[k]])
-                self.polarization[t]+=self.wk[k]*np.sum(operator.diagonal())
-            self.time_occupation[t]=np.sum(self.occupation(self.wavefunction),axis=0)
+        for t in tqdm(range(steps)):
+            self.P[t]=self.polarization()
+            
+            H=self.hamiltonian(self.wfn)
+            wfn_next=np.copy(self.wfn)
+            for i in range(n_corrections):
+                H_next=self.hamiltonian(wfn_next)
+                H_mid=0.5*(H+H_next)
+                for q in range(self.NK):
+                    H_left = I+0.5j*dt*H_mid[q]            
+                    H_right= I-0.5j*dt*H_mid[q]
+                    wfn_next[q]=linalg.solve(H_left, H_right@self.wfn[q]) 
+            self.wfn=np.copy(wfn_next)
+                
+                
+                
+                
+                
+                
+                
+                
+                
+                
+                
